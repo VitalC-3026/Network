@@ -24,81 +24,6 @@ struct datagramHeader {
         flagsDataLen[0] &= 3;
     }
 
-    //void setConnection() {
-    //    flagsDataLen[0] = 32;
-    //}
-    //void setACK() {
-    //    flagsDataLen[0] |= 64; 
-    //}
-    //void setACKConnection() {
-    //    flagsDataLen[0] = 96;
-    //}
-    //void setACKFinishConnection() {
-    //    flagsDataLen[0] = 80; // 01010000
-    //}
-    //void setIsFileName(bool isFile) {
-    //    if (isFile) {
-    //        flagsDataLen[0] |= 128;
-    //    }
-    //}
-    //void setFinishConnection() {
-    //    flagsDataLen[0] = 16;
-    //}
-    //void setSequenceNumber(char num) {
-    //    sequenceNum = num;
-    //}
-    //void setDataLen(int len) {
-    //    if (len > 256) {
-    //        flagsDataLen[0] |= len >> 8;
-    //    }
-    //    flagsDataLen[1] = len % 256;
-    //}
-    //void setACKFileEnd() {
-    //    flagsDataLen[0] = 72; // 01001011
-    //}
-
-    //bool getConnection() {
-    //    if (flagsDataLen[0] == 32) { return true; }
-    //    return false;
-    //}
-    //char getACK() {
-    //    if (flagsDataLen[0] >> 4 == 4) { return true; }
-    //    return false;
-    //}
-    //bool getACKConnection() {
-    //    if (flagsDataLen[0] == 96) { return true; }
-    //    return false;
-    //}
-    //bool getFinishConnection() {
-    //    if (flagsDataLen[0] == 16) { return true; }
-    //    return false;
-    //}
-    //bool getIsFileName() {
-    //    if (flagsDataLen[0] >> 7) { return true; }
-    //    return false;
-    //}
-    //bool getACKFinishConnection() {
-    //    if (flagsDataLen[0] == 80) { return true; }
-    //    return false;
-    //}
-    //char getSequenceNumber() { return sequenceNum; }
-    //bool getACKFileEnd() {
-    //    if (flagsDataLen[0] == 72) { return true; }
-    //    return false;
-    //}
-    //bool getIsFileEnd() {
-    //    if ((flagsDataLen[0] >> 3) % 2) { return true; }
-    //    return false;
-    //}
-    //USHORT getDataLen() {
-    //    USHORT len = 0;
-    //    if (flagsDataLen[0] % 4 != 0) {
-    //        len += (flagsDataLen[0] % 4) << 8;
-    //    }
-    //    len += flagsDataLen[1];
-    //    return len;
-    //}
-
     void setConnection() {
         flagsDataLen[0] = 32; // 00100000
     }
@@ -184,6 +109,11 @@ struct datagramHeader {
     USHORT getDataLen() {
         USHORT len = (USHORT)flagsDataLen[1] % 256;
         len += (flagsDataLen[0] & 3) << 8;
+        if (len == 0) {
+            if ((flagsDataLen[0] & 0b11111000) >> 3 == 0) {
+                len = 1024;
+            }
+        }
         return len;
     }
     char getSequenceNumber() { return sequenceNum; }
@@ -376,11 +306,6 @@ int main()
             }
             else if (rheader.getIsFileEnd()) {
                 if (inFile != "" && outFile != "") {
-                    /*fw.open(outFile, ios::out | ios::binary);
-                    for (vector<char*>::const_iterator iter = recvBuffer.begin(); iter != recvBuffer.end(); iter++) {
-                        int len = (*(iter + 1) - *iter);
-                        fw.write(*iter, len);
-                    }*/
                     fw.close();
                     sheader.clearFlags();
                     sheader.setACKFileEnd();
@@ -401,7 +326,7 @@ int main()
                         // recvBuffer.push_back(buffer);
                         if (inFile != "" && outFile != "") {
                             fw.write(buffer, len);
-                            printf("successfully write file: %s.\n", outFile.c_str());
+                            printf("successfully write file: %s, size: %d.\n", outFile.c_str(), len);
                         }
                         
                         sheader.clearFlags();
@@ -436,7 +361,7 @@ int main()
         }
     }
     catch (std::exception& e) {
-        e.what();
+        cout << e.what() << endl;
     }
         
 
