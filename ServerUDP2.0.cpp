@@ -74,7 +74,7 @@ struct datagramHeader {
         if (flagsDataLen[0] == 32) { return true; }
         return false;
     }
-    char getACK() {
+    bool getACK() {
         if ((flagsDataLen[0] >> 6) % 2) { return true; }
         return false;
     }
@@ -116,7 +116,7 @@ struct datagramHeader {
         }
         return len;
     }
-    char getSequenceNumber() { return sequenceNum; }
+    unsigned char getSequenceNumber() { return sequenceNum; }
 };
 
 void packageData(char* s, datagramHeader header) {
@@ -140,9 +140,6 @@ int unpackageData(char* data, datagramHeader &header, const char* r) {
     return len;
 }
 
-void printDatagram(char* data, datagramHeader header) {
-
-}
 
 bool checksum(char* data, int len) {
     // cout << "checksum" << len << endl;
@@ -169,6 +166,25 @@ bool checksum(char* data, int len) {
         return true;
     }
     return false;
+}
+
+USHORT computeChecksum(char* data, int len)
+{
+    // cout << "computeChecksum" << len << endl;
+    USHORT sum = 0;
+    bool flag;
+    for (int i = 2; i < len; i++) {
+        USHORT tmp = (USHORT)data[i] % 256;
+        // cout << i << ":" << tmp << endl;
+        if (sum + tmp < sum) {
+            sum = sum + tmp + 1;
+        }
+        else {
+            sum = sum + tmp;
+        }
+    }
+    // cout << "computerChecksum:" << sum << endl;
+    return ~sum;
 }
 
 string setOutputFileName(string in) {
@@ -265,6 +281,7 @@ int main()
                 sendto(sockServer, sdatagram, headerLen, 0, (SOCKADDR*)&addrClient, sizeof(addrClient));
             }
             else if (rheader.getIsFileName()) {
+                printf("receive filename!\n");
                 inFile = (string)buffer;
                 if (checksum(rdatagram, len + headerLen)) {
                     buffer[strlen(buffer)] = '\0';
@@ -288,6 +305,7 @@ int main()
                 }
             }
             else if (rheader.getFinishConnection()) {
+                printf("receive finish connection!\n");
                 try {
                     sheader.setACKFinishConnection();
                     packageData(sdatagram, sheader);
@@ -305,6 +323,7 @@ int main()
                 break;
             }
             else if (rheader.getIsFileEnd()) {
+                printf("receive file end!\n");
                 if (inFile != "" && outFile != "") {
                     fw.close();
                     sheader.clearFlags();
@@ -313,30 +332,34 @@ int main()
                     packageData(sdatagram, sheader);
                     int msg = sendto(sockServer, sdatagram, headerLen, 0, (SOCKADDR*)&addrClient, sizeof(addrClient));
                     if (msg > 0) {
+                        cout << lastSequence << endl;
                         cout << "Prepared to receive next file." << endl;
                     }
+                    lastSequence = 0;
                 }
 
             }
             else {
                 if (checksum(rdatagram, len + headerLen)) {
-                    char sequence = rheader.getSequenceNumber();
+                    unsigned char sequence = rheader.getSequenceNumber();
                     if (sequence == (lastSequence + 1) % 256) {
                         lastSequence++;
+                        cout << "successfully receive " << (USHORT)sequence << endl;
                         // recvBuffer.push_back(buffer);
                         if (inFile != "" && outFile != "") {
                             fw.write(buffer, len);
-                            printf("successfully write file: %s, size: %d.\n", outFile.c_str(), len);
+                            // printf("successfully write file: %s, size: %d.\n", outFile.c_str(), len);
                         }
                         
                         sheader.clearFlags();
-                        sheader.setSequenceNumber((sequence + 1) % 256);
+                        sheader.setSequenceNumber(sequence + 1);
                         sheader.setACK();
                         memset(sdatagram, 0, datagramLen);
                         packageData(sdatagram, sheader);
                         sendto(sockServer, sdatagram, headerLen, 0, (SOCKADDR*)&addrClient, sizeof(addrClient));
                     }
                     else {
+                        printf("seq != last seq + 1");
                         sheader.clearFlags();
                         sheader.setSequenceNumber((lastSequence + 1) % 256);
                         sheader.setACK();
@@ -347,9 +370,22 @@ int main()
                 }
                 else {
                     cout << "checksum error for data" << endl;
-                    continue;
+                    sheader.clearFlags();
+                    sheader.setSequenceNumber((lastSequence + 1) % 256);
+                    sheader.setACK();
+                    memset(sdatagram, 0, datagramLen);
+                    packageData(sdatagram, sheader);
+                    sendto(sockServer, sdatagram, headerLen, 0, (SOCKADDR*)&addrClient, sizeof(addrClient));
                 }
             }
+        }
+        else {
+            sheader.clearFlags();
+            sheader.setSequenceNumber((lastSequence + 1) % 256);
+            sheader.setACK();
+            memset(sdatagram, 0, datagramLen);
+            packageData(sdatagram, sheader);
+            sendto(sockServer, sdatagram, headerLen, 0, (SOCKADDR*)&addrClient, sizeof(addrClient));
         }
     }
     
