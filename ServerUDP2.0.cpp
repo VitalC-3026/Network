@@ -19,7 +19,7 @@ struct datagramHeader {
     unsigned char checksum[2] = { 0 };
     unsigned char flagsDataLen[2] = { 0 }; // FILE/ACK/SYN/FIN/FileEnd/0/10位DataLen
     unsigned char sequenceNum = '\0'; // 8位序列号                                                                                                                                                                      
-    
+
     void clearFlags() {
         flagsDataLen[0] &= 3;
     }
@@ -127,7 +127,7 @@ void packageData(char* s, datagramHeader header) {
     s[4] = header.sequenceNum;
 }
 
-int unpackageData(char* data, datagramHeader &header, const char* r) {
+int unpackageData(char* data, datagramHeader& header, const char* r) {
     header.checksum[0] = r[0];
     header.checksum[1] = r[1];
     header.flagsDataLen[0] = r[2];
@@ -332,10 +332,9 @@ int main()
                     packageData(sdatagram, sheader);
                     int msg = sendto(sockServer, sdatagram, headerLen, 0, (SOCKADDR*)&addrClient, sizeof(addrClient));
                     if (msg > 0) {
-                        cout << lastSequence << endl;
                         cout << "Prepared to receive next file." << endl;
                     }
-                    lastSequence = 0;
+                    lastSequence = -1;
                 }
 
             }
@@ -344,13 +343,13 @@ int main()
                     unsigned char sequence = rheader.getSequenceNumber();
                     if (sequence == (lastSequence + 1) % 256) {
                         lastSequence++;
-                        cout << "successfully receive " << (USHORT)sequence << endl;
+                        cout << "successfully receive " << lastSequence << " " << (USHORT)sequence << endl;
                         // recvBuffer.push_back(buffer);
                         if (inFile != "" && outFile != "") {
                             fw.write(buffer, len);
                             // printf("successfully write file: %s, size: %d.\n", outFile.c_str(), len);
                         }
-                        
+
                         sheader.clearFlags();
                         sheader.setSequenceNumber(sequence + 1);
                         sheader.setACK();
@@ -388,7 +387,7 @@ int main()
             sendto(sockServer, sdatagram, headerLen, 0, (SOCKADDR*)&addrClient, sizeof(addrClient));
         }
     }
-    
+
     try {
         int msg = recvfrom(sockServer, rdatagram, datagramLen, 0, (SOCKADDR*)&addrClient, &fromLen);
         unpackageData(buffer, rheader, rdatagram);
@@ -399,7 +398,7 @@ int main()
     catch (std::exception& e) {
         cout << e.what() << endl;
     }
-        
+
 
     delete[] buffer;
     delete[] sdatagram;
