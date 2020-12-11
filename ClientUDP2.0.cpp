@@ -286,14 +286,10 @@ DWORD WINAPI recvMsg(LPVOID lparam)
         unpackageData(header, datagram);
         if (msg > 0) {
             unsigned char sequence = header.getSequenceNumber();
-            // if (sequence == windowBase + 1 || sequence < (windowBase + 128) % 256) {
-            cout << (USHORT)sequence << endl;
-            
-            if (header.getACK() && sequence == (windowBase + 1)%256) {
-                cout << "successfully send: " << windowBase % 256 << endl;
+            if (header.getACK() && sequence == (windowBase + 1) % 256) {
+                cout << "successfully send: " << windowBase << " " << sequence - 1 << endl;
                 gMutex.lock();
                 windowBase++;
-                // curBufferNum++; // 从vector那里删掉信息
                 quickResend = 0;
                 exitTimerThread = true;
                 if (windowBase == recbuffer.size()) {
@@ -307,7 +303,7 @@ DWORD WINAPI recvMsg(LPVOID lparam)
             }
             else {
                 gMutex.lock();
-                cout << "failed to send: " << (USHORT)windowBase % 256 << endl;
+                cout << "failed to send: " << windowBase % 256 << endl;
                 quickResend++;
                 gMutex.unlock();
                 if (quickResend == 3) {
@@ -610,7 +606,7 @@ int main()
                 Sleep(50);
             }
             // 窗口大小，限制了继续发送新数据报
-            
+
             if (nextSequence < windowSize + windowBase && nextSequence < recbuffer.size()) {
                 count++;
                 gMutex.lock();
@@ -637,16 +633,15 @@ int main()
                     start_time = GetTickCount();
                     exitTimerThread = false;
                     timer = CreateThread(NULL, NULL, ntimer, (params*)&param, 0, &timerThreadId);
-                    
                 }
                 if (msg > 0) {
                     nextSequence++;
-                    cout << count << " " << nextSequence << endl;
+                    cout << "successfully send " << nextSequence << endl;
                 }
                 // 创建线程进行计时
-                
+
             }
-            else if (nextSequence < windowBase + windowSize) {
+            else if (nextSequence >= windowBase + windowSize) {
                 cout << "Window full, wait..." << endl;
                 Sleep(50);
             }
@@ -658,7 +653,7 @@ int main()
         recbuffer.clear();
         delete[] contentBuffer;
         fr.close();
-        
+
         sheader.clearFlags();
         sheader.setFileEnd();
         sheader.setDataLen(0);
