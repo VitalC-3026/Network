@@ -1,55 +1,64 @@
+#define NOMINMAX
 #include <iostream>
-#include <fstream>
 #include <WinSock2.h>
 #include <windows.h>
 #include <stdio.h>
-#include <exception>
-#include <ctime>
+#include <cstring>
+#include <fstream>
 #pragma comment(lib, "ws2_32.lib")
 
 using namespace std;
 
 const int maxLen = 256;
-const int headerLen = 4;
-clock_t start, finish;
-int totalLen = 0;
 
+const int headerLen = 4;
+
+// 总共有64位, 8个字节
 struct datagramHeader {
     unsigned char checksum[2] = { 0 };
     unsigned char flags = 0; // 只需要用6个bit N/FN/E/A/P/R/S/F
     unsigned char dataLen = 0;
-    void printInfo();
 
-    bool getACK();
-    bool getSequenceNumber();
-    bool getConnection();
-    bool getIsFileName();
-    bool getACKConnection();
-    bool getFinishConnection();
-    bool getACKFinishConnection();
+    void printInfo();
 
     bool setACK();
     bool setSequenceNumber(bool);
     bool setConnection();
-    bool setIsFileName(bool);
     bool setACKConnection();
     bool setACKFinishConnection();
     bool setFinishConnection();
+    bool setIsFileName(bool);
+
+    bool getACK();
+    bool getIsFileName();
+    bool getSequenceNumber();
+    bool getACKConnection();
+    bool getACKFinishConnection();
+    bool getConnection();
+    bool getFinishConnection();
 
     void clearFlags() {
         flags = 0;
     }
 };
 
+
 void datagramHeader::printInfo() {
-    cout << "checksum: " << (USHORT)this->checksum[0] % 256 << (USHORT)this->checksum[1] << endl;
-    cout << "flags: " << (USHORT)this->flags % 256 << endl;
-    cout << "dataLen: " << (USHORT)this->dataLen % 256 << endl;
+    std::cout << "checksum: " << (USHORT)this->checksum[0] % 256 << (USHORT)this->checksum[1] << endl;
+    std::cout << "flags: " << (USHORT)this->flags % 256 << endl;
+    std::cout << "dataLen: " << (USHORT)this->dataLen % 256 << endl;
 }
 
-
 bool datagramHeader::getACK() {
-    if ((flags >> 4) % 2) {
+    if ((USHORT)flags % 256 == 16 || (USHORT)flags % 256 == 144 ||
+        (USHORT)flags % 256 == 208 || (USHORT)flags % 256 == 80) {
+        return true;
+    }
+    return false;
+}
+
+bool datagramHeader::getSequenceNumber() {
+    if (((USHORT)flags % 256) >> 7) {
         return true;
     }
     return false;
@@ -69,8 +78,8 @@ bool datagramHeader::getACKConnection() {
     return false;
 }
 
-bool datagramHeader::getSequenceNumber() {
-    if (((USHORT)flags % 256) / 128) {
+bool datagramHeader::getACKFinishConnection() {
+    if (flags == 17) {
         return true;
     }
     return false;
@@ -85,13 +94,6 @@ bool datagramHeader::getConnection() {
 
 bool datagramHeader::getFinishConnection() {
     if (((USHORT)flags % 256) % 2) {
-        return true;
-    }
-    return false;
-}
-
-bool datagramHeader::getACKFinishConnection() {
-    if (flags == 17) {
         return true;
     }
     return false;
@@ -134,45 +136,88 @@ bool datagramHeader::setACKFinishConnection() {
     return true;
 }
 
-void packageData(char* d, const char* content, datagramHeader header) {
+bool checkIpAddr(const char* s) {
+    int len = strlen(s);
+    int res = 0, idx = -1, count = 0;
+    for (int i = 0; i < len; i++) {
+        if (s[i] < '0' || s[i] > '9') {
+            if (s[i] != '.') {
+                return false;
+            }
+            else {
+                count++;
+                if (i - idx == 4) {
+                    int tmp = (s[i - 3] - '0') * 100 + (s[i - 2] - '0') * 10 + (s[i - 1] - '0');
+                    if (tmp > 255 || tmp < 0) {
+                        return false;
+                    }
+                }
+                else if (i - idx > 4) {
+                    return false;
+                }
+                idx = i;
+            }
+        }
+    }
+    if (count != 3) {
+        return false;
+    }
+    return true;
+}
+
+bool checkPortAddr(const char* s, USHORT& port) {
+    int len = strlen(s);
+    int res = 0;
+    for (int i = 0; i < len; i++) {
+        if (s[i] < '0' || s[i] > '9') {
+            return false;
+        }
+        res += (s[i] - '0') * pow(10, len - i - 1);
+    }
+    if (res < 0 || res > 65535) {
+        return false;
+    }
+    port = res;
+    return true;
+}
+
+void packageData(char* d, const char* content, int dataLen, datagramHeader header) {
     d[0] = header.checksum[0];
     d[1] = header.checksum[1];
     d[2] = header.flags;
-    d[3] = 0;
-    /*for (int i = 0; i < 5; i++) {
-        d[8 + i] = content[i];
+    d[3] = dataLen;
+    for (int i = 0; i < dataLen; i++) {
+        d[headerLen + i] = content[i];
     }
-    d[strlen(content) + 8] = '\0';*/
 }
 
-int unpackageData(char* content, datagramHeader& header, char* s) {
+void unpackageData(char* content, datagramHeader& header, const char* s) {
     header.checksum[0] = s[0];
     header.checksum[1] = s[1];
     header.flags = s[2];
     header.dataLen = s[3];
-    int len = (USHORT)s[3] % 256;
-    if (len == 0 && (header.flags == 0 || header.flags == 128)) {
-        len = 256;
-    }
-    for (int i = 0; i < len; i++) {
-        content[i] = s[i + headerLen];
-    }
-    return len + headerLen;
+    //// 判断dataLen是0还是256
+    //int len = (USHORT)s[3] % 256;
+    //if (len == 0) {
+    //    if (s[8] != '\0') {
+    //        len = 256;
+    //    }
+    //}
+    //for (int i = 0; i < len; i++) {
+    //    content[i] = s[i + 8];
+    //}
 }
 
 void printDatagram(const char* buffer, datagramHeader header) {
-    cout << "header: " << endl;
+    std::cout << "header: " << endl;
     header.printInfo();
-    cout << "data content: " << endl;
-    cout << buffer << endl;
+    std::cout << "data content: " << endl;
+    std::cout << buffer << endl;
 }
 
-bool checksum(char* data, int len) {
+USHORT computeChecksum(char* data, int len) {
     USHORT sum = 0;
-    USHORT checksum1 = (USHORT)data[0] % 256 << 8;
-    USHORT checksum2 = ((USHORT)data[1] % 256);
-    sum += checksum1;
-    sum += checksum2;
+    bool flag;
     for (int i = 2; i < len; i++) {
         USHORT tmp = (USHORT)data[i] % 256;
         if (sum + tmp < sum) {
@@ -182,20 +227,7 @@ bool checksum(char* data, int len) {
             sum = sum + tmp;
         }
     }
-    if (sum == (USHORT)~0) {
-        return true;
-    }
-    return false;
-}
-
-string setOutputFileName(string in) {
-    int rDot = in.rfind(".");
-    string type = in.substr(rDot);
-    int rSlash = in.rfind("\\");
-    string fileName = in.substr(rSlash + 1, rDot - rSlash - 1);
-    fileName += (string)"out";
-    fileName += type;
-    return fileName;
+    return ~sum;
 }
 
 int main()
@@ -211,7 +243,7 @@ int main()
     if (err != 0) {
         printf("Call WSAStartup error. Any key return. \n");
         getchar();
-        return 0;
+        return -1;
     }
 
     // 判断版本是否符合要求
@@ -219,211 +251,351 @@ int main()
         WSACleanup();
         printf("Socket doesn't support Version 2.2. Any key return. \n");
         getchar();
-        return 0;
+        return -1;
     }
 
     // 建立套接字
-    SOCKET sockServer = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sockServer == INVALID_SOCKET) {
+    SOCKET sockClient = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sockClient == INVALID_SOCKET) {
         WSACleanup();
         printf("Socket open error. Any key return. \n");
         getchar();
-        return 0;
+        return -1;
     }
-
-    printf("Hello receiver!\n");
-
+    printf("Hello, sender!\n");
     SOCKADDR_IN addrServer;
+    int fromLen = sizeof(addrServer);
     SOCKADDR_IN addrClient;
     addrClient.sin_family = AF_INET;
     addrServer.sin_family = AF_INET;
-    addrServer.sin_port = htons(1001);
-    addrServer.sin_addr.S_un.S_addr = inet_addr("127.0.0.1");
 
-    // 服务器端绑定端口
-    if (bind(sockServer, (SOCKADDR*)&addrServer, sizeof(addrServer)) == SOCKET_ERROR) {
-        closesocket(sockServer);
-        WSACleanup();
-        printf("Socket bind error. Any key return. \n");
-        getchar();
-        return 0;
-    }
+    // 输入IP地址并检查正确性
+    printf("Please enter the destination IP and port.\n");
+    char IpAddr[16] = { 0 };
+    printf("IP:");
+    std::cin.getline(IpAddr, 15, '\n');
+    IpAddr[strlen(IpAddr)] = '\0';
 
-    char* buffer = new char[maxLen + 1];
-    int datagramLen = maxLen + headerLen;
-    char* rdatagram = new char[datagramLen + 1];
-    char* sdatagram = new char[datagramLen + 1];
-    datagramHeader rdatagramHeader;
-    datagramHeader sdatagramHeader;
-    int fromLen = sizeof(addrClient);
-    bool curSeq = false;
-    string inFile = "";
-    string outFile = "";
-    ofstream fw;
     int count = 0;
-    // 等待消息
-    while (true) {
-        memset(rdatagram, 0, datagramLen);
-        memset(sdatagram, 0, datagramLen);
-        memset(buffer, 0, maxLen + 1);
-        sdatagramHeader.clearFlags();
-        int msg = recvfrom(sockServer, rdatagram, datagramLen, 0, (SOCKADDR*)&addrClient, &fromLen);
-        if (msg > 0) {
-            int len = unpackageData(buffer, rdatagramHeader, rdatagram);
-            /*sdatagramHeader.setDstPort(ntohs(addrClient.sin_port));
-            sdatagramHeader.setRscPort(1000);*/
-            // cout << "receive message length: " << len << endl;
-            if (rdatagramHeader.getACKConnection()) {
-                printf("3 rounds of shaking hands finished!\n");
-            }
-            else if (rdatagramHeader.getConnection()) {
-                printf("1 round of shaking hands!\n");
-                sdatagramHeader.clearFlags();
-                sdatagramHeader.setACKConnection();
-                memset(buffer, 0, maxLen + 1);
-                packageData(sdatagram, buffer, sdatagramHeader);
-                sendto(sockServer, sdatagram, headerLen, 0, (SOCKADDR*)&addrClient, sizeof(addrClient));
-            }
-            else if (rdatagramHeader.getACK() && rdatagramHeader.getIsFileName()) {
-                finish = clock();
-                cout << inFile.c_str() << " finish!" << endl;
-                cout << "transfer time: " << (finish - start) / CLOCKS_PER_SEC << "s" << endl;
-                cout << "throughput rate: " << totalLen * CLOCKS_PER_SEC / (finish - start) << " byte(s)/s" << endl;
-            }
-            else if (rdatagramHeader.getIsFileName()) {
-                inFile = (string)buffer;
-                if (checksum(rdatagram, len)) {
-                    start = clock();
-                    totalLen = 0;
-                    buffer[strlen(buffer)] = '\0';
-                    cout << "successfully receive fileName> " << buffer << endl;
-                    outFile = setOutputFileName(inFile);
-                    sdatagramHeader.setACK();
-                    sdatagramHeader.setIsFileName(true);
-                    sdatagramHeader.setSequenceNumber(false);
-                    memset(buffer, 0, maxLen + 1);
-                    packageData(sdatagram, buffer, sdatagramHeader);
-                    sendto(sockServer, sdatagram, headerLen, 0, (SOCKADDR*)&addrClient, sizeof(addrClient));
-                }
-                else {
-                    sdatagramHeader.setACK();
-                    sdatagramHeader.setIsFileName(true);
-                    sdatagramHeader.setSequenceNumber(true);
-                    memset(buffer, 0, maxLen + 1);
-                    packageData(sdatagram, buffer, sdatagramHeader);
-                    sendto(sockServer, sdatagram, headerLen, 0, (SOCKADDR*)&addrClient, sizeof(addrClient));
-                }
-            }
-            else if (rdatagramHeader.getFinishConnection()) {
-                try {
-                    sdatagramHeader.setACKFinishConnection();
-                    packageData(sdatagram, buffer, sdatagramHeader);
-                    sendto(sockServer, sdatagram, headerLen + 5, 0, (SOCKADDR*)&addrClient, sizeof(addrClient));
-                    printf("Agree to stop the connection from sender to receiver.\n");
-                    memset(sdatagram, 0, datagramLen);
-                    packageData(sdatagram, buffer, sdatagramHeader);
-                    sdatagramHeader.clearFlags();
-                    sdatagramHeader.setFinishConnection();
-                    sendto(sockServer, sdatagram, headerLen + 5, 0, (SOCKADDR*)&addrClient, sizeof(addrClient));
-                }
-                catch (std::exception& e) {
-                    e.what();
-                }
-                break;
-            }
-            else {
-                // cout << "pack" << count++ << endl;
-                bool sequence = rdatagramHeader.getSequenceNumber();
-                if (curSeq != sequence) {
-                    cout << "Sequence Number Error! Send ACK again!" << endl;
-                    sdatagramHeader.clearFlags();
-                    sdatagramHeader.setACK();
-                    sdatagramHeader.setSequenceNumber(!sequence);
-                    memset(buffer, 0, maxLen + 1);
-                    packageData(sdatagram, buffer, sdatagramHeader);
-                    sendto(sockServer, sdatagram, headerLen, 0, (SOCKADDR*)&addrClient, sizeof(addrClient));
-                    continue;
-                }
-                // cout << "current sequence number" << curSeq << endl;
-                if (checksum(rdatagram, len)) {
-                    curSeq = !curSeq;
-                    // cout << "Next expected sequence number" << curSeq << endl;
-                    // cout << "dataLen: " << len;
-                    totalLen += len - headerLen;
-                    if (inFile != "" && outFile != "") {
-                        fw.open(outFile.c_str(), ios::binary | ios::app);
-                        fw.write(buffer, len - headerLen);
-                        fw.close();
-                    }
-                    else {
-                        cout << "No target file to write!" << endl;
-                    }
-                    // send ACK back
-                    sdatagramHeader.clearFlags();
-                    sdatagramHeader.setACK();
-                    sdatagramHeader.setSequenceNumber(sequence);
-                    memset(buffer, 0, maxLen + 1);
-                    packageData(sdatagram, buffer, sdatagramHeader);
-                    // sdatagram[8] = '\0';
-                    sendto(sockServer, sdatagram, headerLen, 0, (SOCKADDR*)&addrClient, sizeof(addrClient));
-                }
-                else {
-                    cout << "checksum error" << endl;
-                    sdatagramHeader.setACK();
-                    sdatagramHeader.setSequenceNumber(!sequence);
-                    memset(buffer, 0, maxLen + 1);
-                    packageData(sdatagram, buffer, sdatagramHeader);
-                    // sdatagram[8] = '\0';
-                    sendto(sockServer, sdatagram, headerLen + 5, 0, (SOCKADDR*)&addrClient, sizeof(addrClient));
-                    continue;
-                }
-            }
-        }
-        else if (msg == 0) {
-            printf("Connection stop. Any key to return.\n");
-            getchar();
-            return 0;
-        }
-        else if (msg == SOCKET_ERROR) {
-            err = WSAGetLastError();
-            switch (err) {
-            case(WSAENETDOWN):
-                printf("WINDOWS套接口实现检测到网络子系统失效.\n");
-                break;
-            case(WSAEFAULT):
-                printf("fromlen参数非法；from缓冲区大小无法装入端地址.\n");
-                break;
-            case(WSAEINTR):
-                printf("阻塞进程被WSACancelBlockingCall()取消.\n");
-                break;
-            case(WSAEINPROGRESS):
-                printf("一个阻塞的WINDOWS套接口调用正在运行中.\n");
-                break;
-            case(WSAEMSGSIZE):
-                printf("数据报太大无法全部装入缓冲区，故被剪切.\n");
-                break;
-            case(WSAECONNABORTED):
-                printf("由于超时或其他原因，虚电路失效.\n");
-                break;
-            }
-            printf("Any key to return.\n");
+    while (!checkIpAddr(IpAddr)) {
+        printf("\nPlease retype a correct IP address.\nIP:");
+        std::cin.clear();
+        std::cin.getline(IpAddr, 15);
+        IpAddr[strlen(IpAddr)] = '\0';
+        // cin.ignore((std::numeric_limits< streamsize >::max)(), '\n');
+        count++;
+        if (count >= 10) {
+            printf("Too many times of erroneous Ip address. Any key to return. \n");
             getchar();
             return -1;
         }
-        //sendto(sockServer, buffer, strlen(buffer), 0, (SOCKADDR*)&addrClient, fromLen);
-    }
-    try {
-        int msg = recvfrom(sockServer, rdatagram, datagramLen, 0, (SOCKADDR*)&addrClient, &fromLen);
-        unpackageData(buffer, rdatagramHeader, rdatagram);
-        if (msg > 0 && rdatagramHeader.getACKFinishConnection()) {
-            printf("Successfully stop the connection from receiver to sender.\n");
-        }
-    }
-    catch (std::exception& e) {
-        e.what();
     }
 
-    closesocket(sockServer);
+    // 输入端口号并检查正确性
+    USHORT port = 0;
+    printf("port:");
+    char cport[6];
+    std::cin.getline(cport, 6, '\n');
+
+
+    count = 0;
+    while (!checkPortAddr(cport, port)) {
+        printf("\nPlease retype a correct port.\nport:");
+        std::cin.clear();
+        std::cin.getline(cport, 5);
+        cport[strlen(cport)] = '\0';
+        // cin.ignore((std::numeric_limits< streamsize >::max)(), '\n');
+        count++;
+        if (count >= 10) {
+            printf("Too many times of erroneous port. Any key to return. \n");
+            getchar();
+            return -1;
+        }
+    }
+    addrServer.sin_port = htons(port);
+    addrServer.sin_addr.S_un.S_addr = inet_addr(IpAddr);
+
+    // 获取本地动态分配的端口号
+    int lenClient = sizeof(addrClient);
+    getsockname(sockClient, (SOCKADDR*)&addrClient, &lenClient);
+    USHORT localPort = ntohs(addrClient.sin_port);
+
+    char* buffer = new char[maxLen + 1];
+
+    // 发起连接请求
+    datagramHeader sheader;
+    datagramHeader rheader;
+    sheader.setConnection();
+    int datagramLen = headerLen + maxLen;
+    char* sdatagram = new char[datagramLen + 1];
+    char* rdatagram = new char[datagramLen + 1];
+    memset(sdatagram, 0, datagramLen);
+    memset(rdatagram, 0, datagramLen);
+    memset(buffer, 0, maxLen + 1);
+    packageData(sdatagram, buffer, 0, sheader);
+    printDatagram(buffer, sheader);
+
+    while (true) {
+        int scon = sendto(sockClient, sdatagram, datagramLen, 0, (SOCKADDR*)&addrServer, sizeof(addrServer));
+        if (scon > 0) {
+            printf("successfully send connection request, size: %d. \n", scon);
+        }
+        int rcon = recvfrom(sockClient, rdatagram, datagramLen, 0, (SOCKADDR*)&addrServer, &fromLen);
+        if (rcon > 0) {
+            memset(buffer, 0, maxLen + 1);
+            unpackageData(buffer, rheader, rdatagram);
+            buffer[strlen(buffer)] = '\0';
+            printDatagram(buffer, rheader);
+            bool ACK = rheader.getACKConnection();
+            if (ACK) {
+                printf("successfully shake hands!\n");
+                break;
+            }
+        }
+    }
+    sheader.setACKConnection();
+    memset(buffer, 0, maxLen + 1);
+    packageData(sdatagram, buffer, 0, sheader);
+    int scon = sendto(sockClient, sdatagram, datagramLen, 0, (SOCKADDR*)&addrServer, sizeof(addrServer));
+    if (scon > 0) {
+        printf("successfully connected!\n");
+    }
+
+    // 输入要读取的文件的路径，如果输入为exit，则程序结束
+    char* filePath = new char[maxLen + 1];
+    std::cout << "filePath>";
+    bool sequenceNum = false;
+    bool error = false, error5 = false;
+    while (std::cin.getline(filePath, maxLen)) {
+        if (!strcmp(filePath, "exit")) {
+            sheader.clearFlags();
+            sheader.setFinishConnection();
+            memset(sdatagram, 0, datagramLen);
+            memset(buffer, 0, maxLen + 1);
+            packageData(sdatagram, buffer, 0, sheader);
+            sendto(sockClient, sdatagram, datagramLen, 0, (SOCKADDR*)&addrServer, sizeof(addrServer));
+            int msg = recvfrom(sockClient, rdatagram, datagramLen, 0, (SOCKADDR*)&addrServer, &fromLen);
+            if (msg > 0) {
+                unpackageData(buffer, rheader, rdatagram);
+                if (rheader.getACKFinishConnection()) {
+                    printf("Successfully stop the connection from sender to receiver.\n");
+                    break;
+                }
+            }
+            std::cout << "filePath>";
+            continue;
+        }
+        if (!strcmp(filePath, "error")) {
+            error = true;
+            const char errorPath[] = "E:\\Network\\test1\\test.txt";
+            for (int i = 0; i < strlen(errorPath); i++) {
+                filePath[i] = errorPath[i];
+            }
+            filePath[strlen(errorPath)] = '\0';
+        }
+        if (!strcmp(filePath, "error+")) {
+            error5 = true;
+            const char errorPath[] = "E:\\Network\\test1\\test.txt";
+            for (int i = 0; i < strlen(errorPath); i++) {
+                filePath[i] = errorPath[i];
+            }
+            filePath[strlen(errorPath)] = '\0';
+        }
+        ifstream fr(filePath, ios::binary);
+        if (fr.good()) {
+            printf("File %s exists.\n", filePath);
+        }
+        else {
+            printf("File %s doesn't exist.\n", filePath);
+            std::cout << "filePath>";
+            continue;
+        }
+
+        // 设置标志位
+        sheader.clearFlags();
+        sheader.setIsFileName(true);
+
+        // 装包并计算校验和
+        packageData(sdatagram, filePath, strlen(filePath), sheader);
+        USHORT checksum = computeChecksum(sdatagram, strlen(filePath) + headerLen);
+        sdatagram[0] = checksum >> 8;
+        sdatagram[1] = checksum % 256;
+
+        // 发送文件名
+        int resendCount = 0;
+        while (true) {
+            if (resendCount > 5) {
+                std::cout << "too many resend!" << endl;
+                break;
+            }
+            resendCount++;
+            int scon = sendto(sockClient, sdatagram, datagramLen, 0, (SOCKADDR*)&addrServer, sizeof(addrServer));
+            if (scon > 0) {
+                printf("successfully send file name, size: %d. \n", scon);
+            }
+            memset(rdatagram, 0, datagramLen);
+            int rcon = recvfrom(sockClient, rdatagram, datagramLen, 0, (SOCKADDR*)&addrServer, &fromLen);
+            if (rcon > 0) {
+                memset(buffer, 0, maxLen + 1);
+                unpackageData(buffer, rheader, rdatagram);
+                buffer[strlen(buffer)] = '\0';
+                bool ACK = rheader.getIsFileName() && rheader.getACK() && !rheader.getSequenceNumber();
+                if (ACK) {
+                    printf("file name is received successfully.\n");
+                    break;
+                }
+            }
+        }
+
+        fr.open(filePath, ios::binary, 0);
+
+        bool resend = false;
+        int pos = 0;
+        fr.clear();
+        fr.seekg(0, fr.end);
+        int fileLen = fr.tellg();
+        fr.clear();
+        fr.seekg(0, fr.beg);
+        int count = 0;
+        resendCount = 0;
+        int dataLen = maxLen;
+
+        // 发送与接收消息
+        while ((!fr.eof()) && pos < fileLen) {
+            // std::cout << "pack" << count++ << endl;
+            memset(buffer, 0, maxLen + 1);
+            if (resend) {
+                if (resendCount > 5) {
+                    std::cout << "too many resend!" << endl;
+                    break;
+                }
+                resendCount++;
+                // 读文件
+                pos -= dataLen;
+                fr.clear();
+                fr.seekg(pos);
+                fr.read(buffer, dataLen);
+                pos += dataLen;
+                fr.clear();
+                fr.seekg(pos);
+                buffer[maxLen] = '\0';
+                std::cout << "resend: ";
+                // std::cout << dataLen << endl;
+                resend = false;
+            }
+            else {
+                if (pos + maxLen < fileLen) {
+                    dataLen = maxLen;
+                }
+                else {
+                    dataLen = fileLen - pos;
+                }
+                fr.read(buffer, dataLen);
+                pos += dataLen;
+                fr.clear();
+                fr.seekg(pos);
+                buffer[maxLen] = '\0';
+                // std::cout << "send: ";
+                // std::cout << dataLen << endl;
+                // dataLen = fr.gcount();
+                // std::cout << buffer << endl;
+            }
+
+            // 设置标志位
+            sheader.clearFlags();
+            // std::cout << "current sequence number: " << sequenceNum << endl;
+            sheader.setSequenceNumber(sequenceNum);
+            // 装包并计算校验和
+            packageData(sdatagram, buffer, dataLen, sheader);
+            USHORT checksum = computeChecksum(sdatagram, dataLen + headerLen);
+            sdatagram[0] = checksum >> 8;
+            sdatagram[1] = checksum % 256;
+            if (error) {
+                sdatagram[9] = 'X';
+                error = false;
+            }
+            if (error5) {
+                sdatagram[9] = 'X';
+            }
+            int sendmsg = sendto(sockClient, sdatagram, datagramLen, 0, (SOCKADDR*)&addrServer, sizeof(addrServer));
+            if (sendmsg > 0) {
+                // printf("successfully send, size: %d. \n", sendmsg);
+            }
+
+            memset(buffer, 0, maxLen + 1);
+            int recvmsg = recvfrom(sockClient, rdatagram, datagramLen, 0, (SOCKADDR*)&addrServer, &fromLen);
+            if (recvmsg > 0) {
+                unpackageData(buffer, rheader, rdatagram);
+                buffer[strlen(buffer)] = '\0';
+                if (rheader.getSequenceNumber() == sequenceNum) {
+                    // printf("successfully acknowledged! sequenceNum: %d.\n", sequenceNum);
+                    sequenceNum = !sequenceNum;
+                }
+                else {
+                    resend = true;
+                }
+            }
+            else if (recvmsg == 0) {
+                printf("Connection stop. \n");
+            }
+            else if (recvmsg == SOCKET_ERROR) {
+                err = WSAGetLastError();
+                switch (err) {
+                case(WSAENETDOWN):
+                    printf("WINDOWS套接口实现检测到网络子系统失效.\n");
+                    break;
+                case(WSAEFAULT):
+                    printf("fromlen参数非法；from缓冲区大小无法装入端地址.\n");
+                    break;
+                case(WSAEINTR):
+                    printf("阻塞进程被WSACancelBlockingCall()取消.\n");
+                    break;
+                case(WSAEINPROGRESS):
+                    printf("一个阻塞的WINDOWS套接口调用正在运行中.\n");
+                    break;
+                case(WSAEMSGSIZE):
+                    printf("数据报太大无法全部装入缓冲区，故被剪切.\n");
+                    break;
+                case(WSAECONNABORTED):
+                    printf("由于超时或其他原因，虚电路失效.\n");
+                    break;
+                }
+            }
+        }
+        memset(sdatagram, 0, datagramLen);
+        sheader.clearFlags();
+        sheader.setACK();
+        sheader.setIsFileName(true);
+        sheader.dataLen = '\0';
+        memset(buffer, 0, maxLen + 1);
+        packageData(sdatagram, buffer, 0, sheader);
+        sendto(sockClient, sdatagram, headerLen, 0, (SOCKADDR*)&addrServer, sizeof(addrServer));
+        fr.close();
+        std::cout << "filePath>";
+        std::cin.clear();
+    }
+
+    // 断开连接
+    int msg = recvfrom(sockClient, rdatagram, datagramLen, 0, (SOCKADDR*)&addrServer, &fromLen);
+    if (msg > 0) {
+        memset(buffer, 0, maxLen + 1);
+        unpackageData(buffer, rheader, rdatagram);
+        if (rheader.getFinishConnection()) {
+            sheader.clearFlags();
+            sheader.setACKFinishConnection();
+            memset(sdatagram, 0, datagramLen);
+            packageData(sdatagram, buffer, 0, sheader);
+            int msg = sendto(sockClient, sdatagram, datagramLen, 0, (SOCKADDR*)&addrServer, sizeof(addrServer));
+            if (msg > 0) {
+                printf("Agree to stop the connection from receiver to sender.\n");
+            }
+        }
+    }
+    delete[] filePath;
+    delete[] buffer;
+    delete[] sdatagram;
+    delete[] rdatagram;
+    closesocket(sockClient);
     WSACleanup();
     return 0;
 }
