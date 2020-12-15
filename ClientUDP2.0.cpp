@@ -30,6 +30,7 @@ int quickResend = 0;
 mutex gMutex;
 char* contentBuffer;
 DWORD start_time, end_time;
+int dataCount = 0;
 
 struct params {
     SOCKET sockClient;
@@ -234,13 +235,14 @@ bool checkPortAddr(const char* s, USHORT& port)
 DWORD WINAPI ntimer(LPVOID lparam)
 {
     params* param = (params*)lparam;
+    SetPriorityClass(GetCurrentThread(), HIGH_PRIORITY_CLASS);
     cout << "Counter:" << endl;
     DWORD end_time;
     while (!exitTimerThread) {
         end_time = GetTickCount();
-        if (end_time - start_time > 10000) {
+        if (end_time - start_time > 5000) {
             cout << "timeout" << endl;
-            SetPriorityClass(GetCurrentThread(), HIGH_PRIORITY_CLASS);
+            
             char* buffer = new char[maxLen + 1];
             int resendN = nextSequence - windowBase;
             int i;
@@ -265,9 +267,9 @@ DWORD WINAPI ntimer(LPVOID lparam)
                 sendto(param->sockClient, sdatagram, len + headerLen, 0, (SOCKADDR*)&param->addrServer, sizeof(param->addrServer));
             }
             start_time = GetTickCount();
-            SetPriorityClass(GetCurrentThread(), NORMAL_PRIORITY_CLASS);
-            Sleep(50);
+
         }
+        SetPriorityClass(GetCurrentThread(), NORMAL_PRIORITY_CLASS);
         Sleep(50);
     }
     return 0;
@@ -277,6 +279,7 @@ DWORD WINAPI recvMsg(LPVOID lparam)
 {
     params* param = (params*)lparam;
     int fromLen = sizeof(*(param->addrServer));
+    bool dropout;
     while (!exitRecvThread) {
         char* datagram = new char[headerLen];
         memset(datagram, 0, headerLen);
@@ -284,6 +287,9 @@ DWORD WINAPI recvMsg(LPVOID lparam)
         int msg = recvfrom(param->sockClient, datagram, headerLen, 0, param->addrServer, &fromLen);
         datagramHeader header;
         unpackageData(header, datagram);
+        //if (windowBase % 5 == 0) {
+        //    Sleep(10000);
+        //}
         if (msg > 0) {
             unsigned char sequence = header.getSequenceNumber();
             if (header.getACK() && sequence == (windowBase + 1) % 256) {
@@ -586,29 +592,29 @@ int main()
         timeout = false;
         fend = false;
         exitRecvThread = false;
-
+        exitTimerThread = false;
+        dataCount = 0;
         // 创建线程发送数据
         struct params param;
         param.sockClient = sockClient;
         param.addrServer = (SOCKADDR*)&addrServer;
         DWORD recvThreadId;
         DWORD timerThreadId;
-        int count = 0;
+        
         // recvThread = (HANDLE)_beginthreadex(NULL, 0, recvMsg, (struct params*)&param, 0, &recvThreadId);
         recvThread = CreateThread(NULL, NULL, recvMsg, (struct params*)&param, 0, &recvThreadId);
         while (!fend) {
             // 封装数据包
             // 1° 发送数据包之前从缓冲区获取数据
-            // 受刁兆琪启发，这里保存windowBase，万一从这里被调度，计算出来的offset也不会造成人为丢包，同时可以避免上锁，导致死锁局面
             // cout << "recbuffer size: " << recbuffer.size() << endl;
             if (nextSequence >= recbuffer.size()) {
-                cout << "No datagram needs to be sent" << endl;
+                // cout << "No datagram needs to be sent" << endl;
                 Sleep(50);
             }
             // 窗口大小，限制了继续发送新数据报
 
             if (nextSequence < windowSize + windowBase && nextSequence < recbuffer.size()) {
-                count++;
+                dataCount++;
                 gMutex.lock();
                 char* dataStart = recbuffer.at(nextSequence).first;
                 dataLen = recbuffer.at(nextSequence).second;
@@ -627,7 +633,9 @@ int main()
                 USHORT sum = computeChecksum(sdatagram, dataLen + headerLen);
                 sdatagram[0] = sum >> 8;
                 sdatagram[1] = sum % 256;
+
                 int msg = sendto(sockClient, sdatagram, datagramLen, 0, (SOCKADDR*)&addrServer, sizeof(addrServer));
+                
                 memset(buffer, 0, maxLen + 1);
                 if (nextSequence == windowBase) {
                     start_time = GetTickCount();
@@ -643,10 +651,10 @@ int main()
             }
             else if (nextSequence >= windowBase + windowSize) {
                 cout << "Window full, wait..." << endl;
-                Sleep(50);
+                Sleep(500);
             }
         }
-        cout << count << " " << recbuffer.size();
+        cout << dataCount << " " << recbuffer.size();
         exitRecvThread = true;
         exitTimerThread = true;
         CloseHandle(recvThread);
