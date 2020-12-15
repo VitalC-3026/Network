@@ -1,25 +1,23 @@
-﻿#include <iostream>
+#include <iostream>
 #include <fstream>
 #include <WinSock2.h>
 #include <windows.h>
 #include <stdio.h>
 #include <exception>
+#include <ctime>
 #pragma comment(lib, "ws2_32.lib")
 
 using namespace std;
 
 const int maxLen = 256;
-
-const int headerLen = 8;
+const int headerLen = 4;
+clock_t start, finish;
+int totalLen = 0;
 
 struct datagramHeader {
     unsigned char checksum[2] = { 0 };
     unsigned char flags = 0; // 只需要用6个bit N/FN/E/A/P/R/S/F
     unsigned char dataLen = 0;
-    unsigned char dstPort[2] = { 0 };
-    unsigned char rscPort[2] = { 0 };
-    datagramHeader(USHORT dst, USHORT rsc);
-    datagramHeader();
     void printInfo();
 
     bool getACK();
@@ -37,27 +35,11 @@ struct datagramHeader {
     bool setACKConnection();
     bool setACKFinishConnection();
     bool setFinishConnection();
-    
-    void setDstPort(USHORT);
-    void setRscPort(USHORT);
-    void packageHeader(char*);
-    void unpackageHeader(const char*);
-    USHORT getDstPort();
-    USHORT getRscPort();
+
     void clearFlags() {
         flags = 0;
     }
 };
-
-datagramHeader::datagramHeader(USHORT dst, USHORT rsc)
-{
-    dstPort[1] = dst % 256;
-    dstPort[0] = (dst / 256) % 256;
-    rscPort[1] = rsc % 256;
-    rscPort[0] = (rsc / 256) % 256;
-}
-
-datagramHeader::datagramHeader() {}
 
 void datagramHeader::printInfo() {
     cout << "checksum: " << (USHORT)this->checksum[0] % 256 << (USHORT)this->checksum[1] << endl;
@@ -65,56 +47,9 @@ void datagramHeader::printInfo() {
     cout << "dataLen: " << (USHORT)this->dataLen % 256 << endl;
 }
 
-void datagramHeader::setRscPort(USHORT rcv)
-{
-    rscPort[1] = rcv % 256;
-    rscPort[0] = (rcv / 256) % 256;
-}
-
-void datagramHeader::setDstPort(USHORT dst)
-{
-    dstPort[1] = dst % 256;
-    dstPort[0] = (dst / 256) % 256;
-}
-
-USHORT datagramHeader::getDstPort()
-{
-    USHORT res = (USHORT)dstPort[1] % 256;
-    res += ((USHORT)dstPort[0] % 256) * 256;
-    return res;
-}
-
-USHORT datagramHeader::getRscPort()
-{
-    USHORT res = (USHORT)rscPort[1] % 256;
-    res += ((USHORT)rscPort[0] % 256) * 256;
-    return res;
-}
-
-void datagramHeader::packageHeader(char* s) {
-    s[0] = checksum[0];
-    s[1] = checksum[1];
-    s[2] = flags;
-    s[3] = dataLen;
-    s[4] = dstPort[0];
-    s[5] = dstPort[1];
-    s[6] = rscPort[0];
-    s[7] = rscPort[1];
-}
-
-void datagramHeader::unpackageHeader(const char* s) {
-    checksum[0] = s[0];
-    checksum[1] = s[1];
-    flags = s[2];
-    dataLen = s[3];
-    dstPort[0] = s[4];
-    dstPort[1] = s[5];
-    rscPort[0] = s[6];
-    rscPort[1] = s[7];
-}
 
 bool datagramHeader::getACK() {
-    if ((USHORT)flags % 256 == 16 || (USHORT)flags % 256 == 144) {
+    if ((flags >> 4) % 2) {
         return true;
     }
     return false;
@@ -203,11 +138,7 @@ void packageData(char* d, const char* content, datagramHeader header) {
     d[0] = header.checksum[0];
     d[1] = header.checksum[1];
     d[2] = header.flags;
-    d[3] = strlen(content);
-    d[4] = header.dstPort[0];
-    d[5] = header.dstPort[1];
-    d[6] = header.rscPort[0];
-    d[7] = header.rscPort[1];
+    d[3] = 0;
     /*for (int i = 0; i < 5; i++) {
         d[8 + i] = content[i];
     }
@@ -219,18 +150,14 @@ int unpackageData(char* content, datagramHeader& header, char* s) {
     header.checksum[1] = s[1];
     header.flags = s[2];
     header.dataLen = s[3];
-    header.dstPort[0] = s[4];
-    header.dstPort[1] = s[5];
-    header.rscPort[0] = s[6];
-    header.rscPort[1] = s[7];
     int len = (USHORT)s[3] % 256;
     if (len == 0 && (header.flags == 0 || header.flags == 128)) {
         len = 256;
     }
     for (int i = 0; i < len; i++) {
-        content[i] = s[i + 8];
+        content[i] = s[i + headerLen];
     }
-    return len + 8;
+    return len + headerLen;
 }
 
 void printDatagram(const char* buffer, datagramHeader header) {
@@ -241,24 +168,24 @@ void printDatagram(const char* buffer, datagramHeader header) {
 }
 
 bool checksum(char* data, int len) {
-	USHORT sum = 0;
-	USHORT checksum1 = (USHORT)data[0] % 256 << 8;
-	USHORT checksum2 = ((USHORT)data[1] % 256);
-	sum += checksum1;
-	sum += checksum2;
-	for (int i = 2; i < len; i++) {
-		USHORT tmp = (USHORT)data[i] % 256;
-		if (sum + tmp < sum) {
-			sum = sum + tmp + 1;
-		}
-		else {
-			sum = sum + tmp;
-		}
-	}
-	if (sum == (USHORT)~0) {
-		return true;
-	}
-	return false;
+    USHORT sum = 0;
+    USHORT checksum1 = (USHORT)data[0] % 256 << 8;
+    USHORT checksum2 = ((USHORT)data[1] % 256);
+    sum += checksum1;
+    sum += checksum2;
+    for (int i = 2; i < len; i++) {
+        USHORT tmp = (USHORT)data[i] % 256;
+        if (sum + tmp < sum) {
+            sum = sum + tmp + 1;
+        }
+        else {
+            sum = sum + tmp;
+        }
+    }
+    if (sum == (USHORT)~0) {
+        return true;
+    }
+    return false;
 }
 
 string setOutputFileName(string in) {
@@ -276,7 +203,7 @@ int main()
     WORD wVersionRequested;
     WSADATA wsaData;
     int err;
-    
+
     wVersionRequested = MAKEWORD(2, 2);
 
     // 启动版本检查
@@ -345,7 +272,7 @@ int main()
             int len = unpackageData(buffer, rdatagramHeader, rdatagram);
             /*sdatagramHeader.setDstPort(ntohs(addrClient.sin_port));
             sdatagramHeader.setRscPort(1000);*/
-            cout << "receive message length: " << len << endl;
+            // cout << "receive message length: " << len << endl;
             if (rdatagramHeader.getACKConnection()) {
                 printf("3 rounds of shaking hands finished!\n");
             }
@@ -353,12 +280,21 @@ int main()
                 printf("1 round of shaking hands!\n");
                 sdatagramHeader.clearFlags();
                 sdatagramHeader.setACKConnection();
-                sdatagramHeader.packageHeader(sdatagram);
+                memset(buffer, 0, maxLen + 1);
+                packageData(sdatagram, buffer, sdatagramHeader);
                 sendto(sockServer, sdatagram, headerLen, 0, (SOCKADDR*)&addrClient, sizeof(addrClient));
+            }
+            else if (rdatagramHeader.getACK() && rdatagramHeader.getIsFileName()) {
+                finish = clock();
+                cout << inFile.c_str() << " finish!" << endl;
+                cout << "transfer time: " << (finish - start) / CLOCKS_PER_SEC << "s" << endl;
+                cout << "throughput rate: " << totalLen * CLOCKS_PER_SEC / (finish - start) << " byte(s)/s" << endl;
             }
             else if (rdatagramHeader.getIsFileName()) {
                 inFile = (string)buffer;
                 if (checksum(rdatagram, len)) {
+                    start = clock();
+                    totalLen = 0;
                     buffer[strlen(buffer)] = '\0';
                     cout << "successfully receive fileName> " << buffer << endl;
                     outFile = setOutputFileName(inFile);
@@ -382,12 +318,10 @@ int main()
                 try {
                     sdatagramHeader.setACKFinishConnection();
                     packageData(sdatagram, buffer, sdatagramHeader);
-                    sdatagram[8] = '\0';
                     sendto(sockServer, sdatagram, headerLen + 5, 0, (SOCKADDR*)&addrClient, sizeof(addrClient));
                     printf("Agree to stop the connection from sender to receiver.\n");
                     memset(sdatagram, 0, datagramLen);
                     packageData(sdatagram, buffer, sdatagramHeader);
-                    sdatagram[8] = '\0';
                     sdatagramHeader.clearFlags();
                     sdatagramHeader.setFinishConnection();
                     sendto(sockServer, sdatagram, headerLen + 5, 0, (SOCKADDR*)&addrClient, sizeof(addrClient));
@@ -398,32 +332,34 @@ int main()
                 break;
             }
             else {
-                cout << "pack" << count++ << endl;
+                // cout << "pack" << count++ << endl;
                 bool sequence = rdatagramHeader.getSequenceNumber();
                 if (curSeq != sequence) {
                     cout << "Sequence Number Error! Send ACK again!" << endl;
+                    sdatagramHeader.clearFlags();
                     sdatagramHeader.setACK();
                     sdatagramHeader.setSequenceNumber(!sequence);
                     memset(buffer, 0, maxLen + 1);
                     packageData(sdatagram, buffer, sdatagramHeader);
-                    sdatagram[8] = '\0';
                     sendto(sockServer, sdatagram, headerLen, 0, (SOCKADDR*)&addrClient, sizeof(addrClient));
                     continue;
                 }
-                cout << "current sequence number" << curSeq << endl;
+                // cout << "current sequence number" << curSeq << endl;
                 if (checksum(rdatagram, len)) {
                     curSeq = !curSeq;
-                    cout << "Next expected sequence number" << curSeq << endl;
+                    // cout << "Next expected sequence number" << curSeq << endl;
                     // cout << "dataLen: " << len;
+                    totalLen += len - headerLen;
                     if (inFile != "" && outFile != "") {
                         fw.open(outFile.c_str(), ios::binary | ios::app);
-                        fw.write(buffer, len-8);
+                        fw.write(buffer, len - headerLen);
                         fw.close();
                     }
                     else {
                         cout << "No target file to write!" << endl;
                     }
                     // send ACK back
+                    sdatagramHeader.clearFlags();
                     sdatagramHeader.setACK();
                     sdatagramHeader.setSequenceNumber(sequence);
                     memset(buffer, 0, maxLen + 1);
@@ -441,7 +377,7 @@ int main()
                     sendto(sockServer, sdatagram, headerLen + 5, 0, (SOCKADDR*)&addrClient, sizeof(addrClient));
                     continue;
                 }
-            }          
+            }
         }
         else if (msg == 0) {
             printf("Connection stop. Any key to return.\n");
@@ -486,9 +422,8 @@ int main()
     catch (std::exception& e) {
         e.what();
     }
-    
+
     closesocket(sockServer);
     WSACleanup();
     return 0;
 }
-
