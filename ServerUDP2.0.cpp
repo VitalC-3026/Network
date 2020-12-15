@@ -14,6 +14,10 @@ const int headerLen = 5;
 const int windowSize = 256; // 接收端窗口256
 vector<char*> recvBuffer;
 int lastSequence = -1;
+int totalLen = 0;
+DWORD gstart_time;
+DWORD gend_time;
+int gLen = 0;
 
 struct datagramHeader {
     unsigned char checksum[2] = { 0 };
@@ -272,6 +276,7 @@ int main()
             cout << "receive message length: " << len << endl;
             if (rheader.getACKConnection()) {
                 printf("3 rounds of shaking hands finished!\n");
+                gstart_time = GetTickCount();
             }
             else if (rheader.getConnection()) {
                 printf("1 round of shaking hands!\n");
@@ -284,6 +289,7 @@ int main()
                 printf("receive filename!\n");
                 inFile = (string)buffer;
                 if (checksum(rdatagram, len + headerLen)) {
+                    gLen = 0;
                     buffer[strlen(buffer)] = '\0';
                     cout << "successfully receive fileName> " << buffer << endl;
                     outFile = setOutputFileName(inFile);
@@ -336,7 +342,10 @@ int main()
                     }
                     lastSequence = -1;
                 }
-
+                gend_time = GetTickCount();
+                DWORD time = gend_time - gstart_time;
+                cout << "transfer time: " <<  (time / 1000) % 60 << "." << time % 1000 << " s" << endl;
+                cout << "throughput rate: " << gLen / ((time / 1000) % 60) << " byte(s)/s" << endl;
             }
             else {
                 if (checksum(rdatagram, len + headerLen)) {
@@ -345,6 +354,7 @@ int main()
                         lastSequence++;
                         cout << "successfully receive " << lastSequence << " " << (USHORT)sequence << endl;
                         // recvBuffer.push_back(buffer);
+                        gLen += len;
                         if (inFile != "" && outFile != "") {
                             fw.write(buffer, len);
                             // printf("successfully write file: %s, size: %d.\n", outFile.c_str(), len);
