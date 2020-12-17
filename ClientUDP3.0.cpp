@@ -16,7 +16,7 @@ const int maxLen = 1024;
 const int headerLen = 5;
 vector<pair<char*, USHORT>> recbuffer; // 缓冲区无限大，记录一下目前确认到了vector的第几个元素
 int windowSize = 1; // 发送端窗口
-int threshold = 1;
+int threshold = 16;
 int curBufferNum = 0;
 int windowBase = 0;
 int nextSequence = 0;
@@ -24,21 +24,23 @@ bool timeout = false;
 bool fend = false;
 bool exitRecvThread = false;
 bool exitTimerThread = false;
+bool avoidJam = false;
+int avoidJamCount = 0;
 HANDLE timer;
 HANDLE recvThread;
+HANDLE resendThread;
 int quickResend = 0;
 mutex gMutex;
 char* contentBuffer;
-DWORD start_time, end_time, rtt_start, RTT = 0;
+DWORD start_time, end_time;
 int dataCount = 0;
+DWORD WINAPI resend(LPVOID lparam);
+bool testQuick = true;
 
 struct params {
     SOCKET sockClient;
     SOCKADDR* addrServer;
 };
-// GBN 设置一个线程计时，设置一个线程
-// while循环一直在发送，直到到了发送端的窗口大小还是缓冲区大小
-// 主线程接收ack，阻塞状态，接收到之后就广播，关掉线程，重新开启线程，移动base， base要作为一个全局变量
 
 struct datagramHeader
 {
@@ -85,7 +87,7 @@ struct datagramHeader
             return;
         }
         if (len > 256) {
-            flagsDataLen[0] = '\0';
+            flagsDataLen[0] &= 248;
             flagsDataLen[0] |= len >> 8;
         }
         flagsDataLen[1] = len % 256;
@@ -149,6 +151,7 @@ void packageData(char* s, const char* data, int len, datagramHeader header)
     for (int i = 0; i < len; i++) {
         s[i + headerLen] = data[i];
     }
+    
 }
 
 void unpackageData(datagramHeader& header, const char* r)
@@ -235,14 +238,13 @@ DWORD WINAPI ntimer(LPVOID lparam)
     DWORD end_time;
     while (!exitTimerThread) {
         end_time = GetTickCount();
-        if (end_time - rtt_start >= RTT) {
-            windowSize++;
-            rtt_start = GetTickCount();
-        }
         if (end_time - start_time > 5000) {
-            cout << "timeout" << endl;
-
+            cout << "===============TIMEOUT!===============" << endl;
+            gMutex.lock();
+            threshold = windowSize / 2;
+            windowSize = 1;
             char* buffer = new char[maxLen + 1];
+            memset(buffer, 0, maxLen + 1);
             int resendN = nextSequence - windowBase;
             int i;
             vector<pair<char*, USHORT>>::const_iterator iter;
@@ -263,13 +265,18 @@ DWORD WINAPI ntimer(LPVOID lparam)
                 USHORT sum = computeChecksum(sdatagram, len + headerLen);
                 sdatagram[0] = sum >> 8;
                 sdatagram[1] = sum % 256;
-                sendto(param->sockClient, sdatagram, len + headerLen, 0, (SOCKADDR*)&param->addrServer, sizeof(param->addrServer));
+                int fromLen = sizeof(*(param->addrServer));
+                int msg = sendto(param->sockClient, sdatagram, len + headerLen, 0, param->addrServer, fromLen);
+                if (msg > 0) {
+                    cout << "resend " << windowBase + i << endl;
+                }
             }
             start_time = GetTickCount();
-
+            gMutex.unlock();
+            Sleep(10);
         }
-        SetPriorityClass(GetCurrentThread(), NORMAL_PRIORITY_CLASS);
-        Sleep(50);
+        
+        
     }
     return 0;
 }
@@ -278,31 +285,46 @@ DWORD WINAPI recvMsg(LPVOID lparam)
 {
     params* param = (params*)lparam;
     int fromLen = sizeof(*(param->addrServer));
-    bool dropout;
+    int testResend = 0;
     while (!exitRecvThread) {
         char* datagram = new char[headerLen];
         memset(datagram, 0, headerLen);
-        cout << "receiving..." << endl;
         int msg = recvfrom(param->sockClient, datagram, headerLen, 0, param->addrServer, &fromLen);
         datagramHeader header;
         unpackageData(header, datagram);
         if (msg > 0) {
             unsigned char sequence = header.getSequenceNumber();
+            if (sequence == 2 && testQuick) {
+                /*quickResend = 2;
+                sequence = 3;*/
+                Sleep(10000);
+                testQuick = false;
+            }
             if (header.getACK() && sequence == (windowBase + 1) % 256) {
-                SetPriorityClass(GetCurrentThread(), HIGH_PRIORITY_CLASS);
-                windowBase++;
-                /* 慢启动过程
-                  if (windowSize < threshold) {
+                // 慢启动过程
+                if (windowSize < threshold) {
                     windowSize++;
-                }*/
-                windowSize++;
-                
+                    cout << "slowStart: windowSize++" << endl;
+                }
+                else {
+                    if (avoidJamCount == 0) {
+                        windowSize++;
+                        avoidJamCount = windowSize;
+                        cout << "avoidJam: windowSize++" << endl;
+                    }
+                    else {
+                        avoidJamCount--;
+                    }
+                    // avoidJam = true;
+                }
+                // windowSize++;
+                windowBase++;
                 quickResend = 0;
                 exitTimerThread = true;
                 if (windowBase == recbuffer.size()) {
                     fend = true;
                 }
-                cout << "successfully send: " << windowBase << " " << sequence - 1 << endl;
+                cout << "receive ACK: " << windowBase << endl;
                 SetPriorityClass(GetCurrentThread(), NORMAL_PRIORITY_CLASS);
             }
             else if (header.getACKFileEnd()) {
@@ -310,23 +332,23 @@ DWORD WINAPI recvMsg(LPVOID lparam)
                 break;
             }
             else {
-                gMutex.lock();
+                // gMutex.lock();
                 quickResend++;
-                cout << "failed to send: " << windowBase % 256 << endl;
-                threshold = threshold / 2;
-                gMutex.unlock();
+                // cout << "failed to send: " << windowBase % 256 << endl;
                 if (quickResend == 3) {
-                    SetPriorityClass(GetCurrentThread(), HIGH_PRIORITY_CLASS);
-                    gMutex.lock();
-                    cout << "quick resend" << endl;
+                    // resend thread start
+                    threshold = windowSize / 2;
+                    windowSize = threshold + 3;
+                    cout << "===============QUICK RESEND===============" << endl;
                     quickResend = 0;
                     char* buffer = new char[maxLen + 1];
+                    memset(buffer, 0, maxLen + 1);
                     int resendN = nextSequence - windowBase;
                     int i;
                     vector<pair<char*, USHORT>>::const_iterator iter;
                     char* sdatagram = new char[maxLen + headerLen];
                     datagramHeader sheader;
-                    for (i = 0, iter = recbuffer.cbegin() + curBufferNum; i < resendN && iter != recbuffer.cend(); i++, iter++) {
+                    for (i = 0, iter = recbuffer.cbegin() + windowBase; i < resendN && iter != recbuffer.cend(); i++, iter++) {
                         USHORT len = (*iter).second;
                         memset(buffer, 0, maxLen + 1);
                         for (int j = 0; j < len; j++) {
@@ -341,10 +363,11 @@ DWORD WINAPI recvMsg(LPVOID lparam)
                         USHORT sum = computeChecksum(sdatagram, len + headerLen);
                         sdatagram[0] = sum >> 8;
                         sdatagram[1] = sum % 256;
-                        sendto(param->sockClient, sdatagram, len + headerLen, 0, (SOCKADDR*)&param->addrServer, sizeof(param->addrServer));
+                        int msg = sendto(param->sockClient, sdatagram, len + headerLen, 0, param->addrServer, fromLen);
+                        if (msg > 0) {
+                            cout << "quick resend " << i + windowBase << endl;
+                        }
                     }
-                    gMutex.unlock();
-                    SetPriorityClass(GetCurrentThread(), NORMAL_PRIORITY_CLASS);
                 }
                 Sleep(50);
             }
@@ -353,6 +376,73 @@ DWORD WINAPI recvMsg(LPVOID lparam)
     return 0;
 }
 
+
+DWORD WINAPI resend(LPVOID lparam) {
+    SetPriorityClass(GetCurrentThread(), HIGH_PRIORITY_CLASS);
+    params* param = (params*)lparam;
+    threshold = windowSize / 2;
+    if (quickResend == 3) {       
+        windowSize = threshold + 3;
+        cout << "QUICK RESEND" << endl;
+        quickResend = 0;
+        char* buffer = new char[maxLen + 1];
+        memset(buffer, 0, maxLen + 1);
+        int resendN = nextSequence - windowBase;
+        int i;
+        vector<pair<char*, USHORT>>::const_iterator iter;
+        char* sdatagram = new char[maxLen + headerLen];
+        datagramHeader sheader;
+        for (i = 0, iter = recbuffer.cbegin() + windowBase; i < resendN && iter != recbuffer.cend(); i++, iter++) {
+            USHORT len = (*iter).second;
+            memset(buffer, 0, maxLen + 1);
+            for (int j = 0; j < len; j++) {
+                buffer[j] = (*iter).first[j];
+            }
+            // 设置header
+            memset(sdatagram, 0, maxLen + headerLen);
+            sheader.clearFlags();
+            sheader.setDataLen(len);
+            sheader.setSequenceNumber(i + windowBase);
+            packageData(sdatagram, buffer, len, sheader);
+            USHORT sum = computeChecksum(sdatagram, len + headerLen);
+            sdatagram[0] = sum >> 8;
+            sdatagram[1] = sum % 256;
+            sendto(param->sockClient, sdatagram, len + headerLen, 0, (SOCKADDR*)&param->addrServer, sizeof(param->addrServer));
+        }
+        // gMutex.unlock();   
+    }
+    else if (timeout) {
+        cout << "TIMEOUT RESEND!" << endl;
+        windowSize = 1;
+        char* buffer = new char[maxLen + 1];
+        memset(buffer, 0, maxLen + 1);
+        int resendN = nextSequence - windowBase;
+        int i;
+        vector<pair<char*, USHORT>>::const_iterator iter;
+        char* sdatagram = new char[maxLen + headerLen];
+        datagramHeader sheader;
+        for (i = 0, iter = recbuffer.cbegin() + windowBase; i < resendN && iter != recbuffer.cend(); i++, iter++) {
+            USHORT len = (*iter).second;
+            memset(buffer, 0, maxLen + 1);
+            for (int j = 0; j < len; j++) {
+                buffer[j] = (*iter).first[j];
+            }
+            // 设置header
+            memset(sdatagram, 0, maxLen + headerLen);
+            sheader.clearFlags();
+            sheader.setDataLen(len);
+            sheader.setSequenceNumber(i + windowBase);
+            packageData(sdatagram, buffer, len, sheader);
+            USHORT sum = computeChecksum(sdatagram, len + headerLen);
+            sdatagram[0] = sum >> 8;
+            sdatagram[1] = sum % 256;
+            sendto(param->sockClient, sdatagram, len + headerLen, 0, (SOCKADDR*)&param->addrServer, sizeof(param->addrServer));
+        }
+        timeout = false;
+    }
+    SetPriorityClass(GetCurrentThread(), NORMAL_PRIORITY_CLASS);
+    return 0;
+}
 
 int main()
 {
@@ -542,11 +632,11 @@ int main()
                 exit = true;
                 break;
             }
-
             int scon = sendto(sockClient, sdatagram, datagramLen, 0, (SOCKADDR*)&addrServer, sizeof(addrServer));
             if (scon > 0) {
                 printf("successfully send file name, size: %d. \n", scon);
             }
+            
             memset(rdatagram, 0, datagramLen);
             int rcon = recvfrom(sockClient, rdatagram, headerLen, 0, (SOCKADDR*)&addrServer, &fromLen);
             if (rcon > 0) {
@@ -557,6 +647,7 @@ int main()
                     printf("file name is received successfully.\n");
                     break;
                 }
+                
             }
             resendFileCount++;
         }
@@ -589,24 +680,6 @@ int main()
             p = p + dataLen;
         }
 
-        // 发送一个探测包计算RTT时间
-        memset(sdatagram, 0, datagramLen);
-        memset(buffer, 0, maxLen + 1);
-        sheader.clearFlags();
-        sheader.setDataLen(3<<9);
-        packageData(sdatagram, buffer, 3 << 9, sheader);
-        rtt_start = GetTickCount();
-        sendto(sockClient, sdatagram, datagramLen, 0, (SOCKADDR*)&addrServer, sizeof(addrServer));
-        int msg = recvfrom(sockClient, rdatagram, headerLen, 0, (SOCKADDR*)&addrServer, &fromLen);
-        unpackageData(rheader, rdatagram);
-        if (msg > 0) {
-            if (rheader.getACK()) {
-                cout << "探测成功！" << endl;
-            }
-        }
-        end_time = GetTickCount();
-        RTT = ((end_time - rtt_start) / 1000) % 60;
-
         // 发送与接收消息
         // 初始化需要用到的变量
         windowBase = 0;
@@ -624,7 +697,6 @@ int main()
         DWORD timerThreadId;
 
         recvThread = CreateThread(NULL, NULL, recvMsg, (struct params*)&param, 0, &recvThreadId);
-        rtt_start = GetTickCount();
         while (!fend) {
             // 封装数据包
             // 1° 发送数据包之前从缓冲区获取数据
@@ -654,10 +726,10 @@ int main()
                 int msg = sendto(sockClient, sdatagram, datagramLen, 0, (SOCKADDR*)&addrServer, sizeof(addrServer));
                 if (msg > 0) {
                     nextSequence++;
-                    cout << "successfully send " << nextSequence << endl;
+                    cout << "send " << nextSequence << endl;
                 }
                 // 创建线程进行计时
-                if (nextSequence == windowBase) {
+                if (exitTimerThread) {
                     start_time = GetTickCount();
                     exitTimerThread = false;
                     timer = CreateThread(NULL, NULL, ntimer, (params*)&param, 0, &timerThreadId);
@@ -666,7 +738,7 @@ int main()
             }
             else if (nextSequence >= windowBase + windowSize) {
                 cout << "Window full, wait..." << endl;
-                Sleep(500);
+                Sleep(1000);
             }
         }
         cout << dataCount << " " << recbuffer.size();
@@ -714,5 +786,3 @@ int main()
     WSACleanup();
     return 0;
 }
-
-
